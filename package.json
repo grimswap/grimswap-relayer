@@ -1,7 +1,7 @@
 {
   "name": "@grimswap/relayer",
   "version": "1.0.0",
-  "description": "Relayer service for GrimSwap private swaps",
+  "description": "ZK Relayer service for GrimSwap - Submit Groth16 proofs for gas-private Uniswap v4 swaps",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -28,9 +28,16 @@
   },
   "keywords": [
     "relayer",
-    "privacy",
     "zk-snark",
-    "ethereum"
+    "groth16",
+    "privacy",
+    "uniswap",
+    "v4",
+    "defi",
+    "ethereum",
+    "unichain",
+    "gas-relay",
+    "grimswap"
   ],
   "author": "GrimSwap",
   "license": "MIT"

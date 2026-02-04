@@ -14,6 +14,8 @@ import { statusRouter } from "./routes/status.js";
 import { feeRouter } from "./routes/fee.js";
 import { logger } from "./utils/logger.js";
 import { rateLimiter } from "./middleware/rateLimiter.js";
+import { relayService } from "./services/relayService.js";
+import { CHAIN_CONFIG, RELAYER_CONFIG } from "./utils/constants.js";
 
 // Load environment variables
 config();
@@ -37,6 +39,23 @@ app.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     version: "1.0.0",
   });
+});
+
+// Relayer info - returns address for proof generation
+app.get("/info", async (req, res) => {
+  try {
+    const balance = await relayService.getBalance();
+    res.json({
+      address: relayService.getAddress(),
+      chain: CHAIN_CONFIG.name,
+      chainId: CHAIN_CONFIG.id,
+      feeBps: RELAYER_CONFIG.DEFAULT_FEE_BPS,
+      balance: balance.toString(),
+    });
+  } catch (error) {
+    logger.error("Info endpoint failed:", error);
+    res.status(500).json({ error: "Failed to get relayer info" });
+  }
 });
 
 // API Routes

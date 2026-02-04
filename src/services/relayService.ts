@@ -4,12 +4,17 @@
  * Handles blockchain interactions for submitting private swaps
  */
 
+import { config } from "dotenv";
+// Load env vars before anything else
+config();
+
 import {
   createWalletClient,
   createPublicClient,
   http,
   encodeFunctionData,
-  parseAbi,
+  encodeAbiParameters,
+  parseAbiParameters,
   type Hex,
   type Address,
 } from "viem";
@@ -17,15 +22,33 @@ import { privateKeyToAccount } from "viem/accounts";
 import { logger } from "../utils/logger.js";
 import { CONTRACTS, CHAIN_CONFIG } from "../utils/constants.js";
 
-// ABI for GrimSwapZK privateSwap function
-const GRIM_SWAP_ZK_ABI = parseAbi([
-  "function swap(address,tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks),tuple(bool zeroForOne, int256 amountSpecified, uint160 sqrtPriceLimitX96),bytes) external returns (int256)",
-]);
-
-// Pool Manager ABI for swap
-const POOL_MANAGER_ABI = parseAbi([
-  "function swap(tuple(address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks) key, tuple(bool zeroForOne, int256 amountSpecified, uint160 sqrtPriceLimitX96) params, bytes hookData) external returns (int256)",
-]);
+// Pool Helper ABI for swap (routes through PoolManager)
+const POOL_HELPER_ABI = [
+  {
+    type: "function",
+    name: "swap",
+    inputs: [
+      {
+        name: "key",
+        type: "tuple",
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      { name: "zeroForOne", type: "bool" },
+      { name: "amountSpecified", type: "int256" },
+      { name: "sqrtPriceLimitX96", type: "uint160" },
+      { name: "hookData", type: "bytes" },
+      { name: "from", type: "address" },
+    ],
+    outputs: [{ name: "delta", type: "int256" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
 
 interface RelayParams {
   proof: {
@@ -67,6 +90,13 @@ class RelayService {
   private publicClient;
   private account;
 
+  /**
+   * Get the relayer's address
+   */
+  getAddress(): string {
+    return this.account.address;
+  }
+
   constructor() {
     const privateKey = process.env.RELAYER_PRIVATE_KEY;
     if (!privateKey) {
@@ -104,21 +134,21 @@ class RelayService {
   private encodeHookData(proof: RelayParams["proof"], publicSignals: string[]): Hex {
     // Convert proof to contract format
     const pA: [bigint, bigint] = [BigInt(proof.a[0]), BigInt(proof.a[1])];
+    // Note: pB needs to be swapped for the contract format
     const pB: [[bigint, bigint], [bigint, bigint]] = [
-      [BigInt(proof.b[0][0]), BigInt(proof.b[0][1])],
-      [BigInt(proof.b[1][0]), BigInt(proof.b[1][1])],
+      [BigInt(proof.b[0][1]), BigInt(proof.b[0][0])],
+      [BigInt(proof.b[1][1]), BigInt(proof.b[1][0])],
     ];
     const pC: [bigint, bigint] = [BigInt(proof.c[0]), BigInt(proof.c[1])];
-    const signals = publicSignals.map((s) => BigInt(s));
+    const signals = publicSignals.map((s) => BigInt(s)) as [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint];
 
     // ABI encode the proof data
-    const hookData = encodeFunctionData({
-      abi: parseAbi(["function encode(uint256[2],uint256[2][2],uint256[2],uint256[])"]),
-      functionName: "encode",
-      args: [pA, pB, pC, signals],
-    }).slice(10) as Hex; // Remove function selector
+    const hookData = encodeAbiParameters(
+      parseAbiParameters("uint256[2], uint256[2][2], uint256[2], uint256[8]"),
+      [pA, pB, pC, signals]
+    );
 
-    return `0x${hookData}` as Hex;
+    return hookData;
   }
 
   /**
@@ -141,21 +171,23 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    // Prepare swap params
-    const swapParameters = {
-      zeroForOne: swapParams.zeroForOne,
-      amountSpecified: BigInt(swapParams.amountSpecified),
-      sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
-    };
+    const poolHelperAddress = CONTRACTS.POOL_HELPER as Address;
 
     // Estimate gas
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
-      to: CONTRACTS.POOL_MANAGER as Address,
+      to: poolHelperAddress,
       data: encodeFunctionData({
-        abi: POOL_MANAGER_ABI,
+        abi: POOL_HELPER_ABI,
         functionName: "swap",
-        args: [poolKey, swapParameters, hookData],
+        args: [
+          poolKey,
+          swapParams.zeroForOne,
+          BigInt(swapParams.amountSpecified),
+          BigInt(swapParams.sqrtPriceLimitX96),
+          hookData,
+          this.account.address, // from address (relayer)
+        ],
       }),
     });
 
@@ -166,11 +198,18 @@ class RelayService {
 
     // Submit transaction
     const txHash = await this.walletClient.sendTransaction({
-      to: CONTRACTS.POOL_MANAGER as Address,
+      to: poolHelperAddress,
       data: encodeFunctionData({
-        abi: POOL_MANAGER_ABI,
+        abi: POOL_HELPER_ABI,
         functionName: "swap",
-        args: [poolKey, swapParameters, hookData],
+        args: [
+          poolKey,
+          swapParams.zeroForOne,
+          BigInt(swapParams.amountSpecified),
+          BigInt(swapParams.sqrtPriceLimitX96),
+          hookData,
+          this.account.address,
+        ],
       }),
       gas: gasLimit,
     });
@@ -214,19 +253,22 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    const swapParameters = {
-      zeroForOne: swapParams.zeroForOne,
-      amountSpecified: BigInt(swapParams.amountSpecified),
-      sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
-    };
+    const poolHelperAddress = CONTRACTS.POOL_HELPER as Address;
 
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
-      to: CONTRACTS.POOL_MANAGER as Address,
+      to: poolHelperAddress,
       data: encodeFunctionData({
-        abi: POOL_MANAGER_ABI,
+        abi: POOL_HELPER_ABI,
         functionName: "swap",
-        args: [poolKey, swapParameters, hookData],
+        args: [
+          poolKey,
+          swapParams.zeroForOne,
+          BigInt(swapParams.amountSpecified),
+          BigInt(swapParams.sqrtPriceLimitX96),
+          hookData,
+          this.account.address,
+        ],
       }),
     });
 

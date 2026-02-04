@@ -63,8 +63,8 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
     res.json({
       success: true,
       txHash: result.txHash,
-      blockNumber: result.blockNumber,
-      gasUsed: result.gasUsed,
+      blockNumber: result.blockNumber.toString(),
+      gasUsed: result.gasUsed.toString(),
       relayerFee: result.relayerFee,
       requestId,
     });
@@ -108,9 +108,11 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
       }
     }
 
+    const errorMessage = error instanceof Error ? error.message : String(error);
     res.status(500).json({
       success: false,
       error: "Failed to relay transaction",
+      details: errorMessage.slice(0, 500),
       code: "RELAY_FAILED",
       requestId,
     });
@@ -134,8 +136,8 @@ relayRouter.post("/estimate", validateRelayRequest, async (req: Request, res: Re
 
     res.json({
       success: true,
-      estimatedGas: estimate.gas,
-      estimatedFee: estimate.fee,
+      estimatedGas: estimate.gas.toString(),
+      estimatedFee: estimate.fee.toString(),
       relayerFee: estimate.relayerFee,
       totalCost: estimate.totalCost,
     });
