@@ -25,10 +25,35 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(helmet());
+
+// CORS configuration - allow frontend domains
+const allowedOrigins = [
+  "https://grimswap.com",
+  "https://www.grimswap.com",
+  "http://localhost:3000",
+  "http://localhost:5173",
+  ...(process.env.ALLOWED_ORIGINS?.split(",") || []),
+];
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(",") || "*",
-  methods: ["GET", "POST"],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV === "development") {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow all for now (hackathon)
+    }
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  credentials: true,
 }));
+
+// Handle preflight requests
+app.options("*", cors());
+
 app.use(express.json({ limit: "1mb" }));
 app.use(rateLimiter);
 
