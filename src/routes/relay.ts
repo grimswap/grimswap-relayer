@@ -46,9 +46,24 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
   try {
     const { proof, publicSignals, swapParams } = req.body as RelayRequest;
 
-    // Extract recipient from public signals for logging
-    const recipient = publicSignals[2];
-    logger.info(`[${requestId}] Recipient: ${recipient.slice(0, 10)}...`);
+    // Public signals order: [0] computedCommitment, [1] computedNullifierHash,
+    // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
+    const merkleRoot = publicSignals[2];
+    const nullifierHash = publicSignals[3];
+    const recipient = publicSignals[4];
+    const relayer = publicSignals[5];
+    const relayerFee = publicSignals[6];
+
+    logger.info(`[${requestId}] Swap details:`, {
+      merkleRoot: merkleRoot.slice(0, 20) + '...',
+      nullifierHash: nullifierHash.slice(0, 20) + '...',
+      recipient: recipient.slice(0, 20) + '...',
+      relayer: relayer.slice(0, 20) + '...',
+      relayerFee,
+      poolKey: swapParams.poolKey,
+      zeroForOne: swapParams.zeroForOne,
+      amountSpecified: swapParams.amountSpecified,
+    });
 
     // Submit to blockchain
     const result = await relayService.submitPrivateSwap({

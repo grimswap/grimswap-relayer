@@ -15,12 +15,45 @@ import {
   encodeFunctionData,
   encodeAbiParameters,
   parseAbiParameters,
+  decodeErrorResult,
   type Hex,
   type Address,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { logger } from "../utils/logger.js";
 import { CONTRACTS, CHAIN_CONFIG } from "../utils/constants.js";
+
+// GrimPool ABI for checking Merkle root and adding roots
+const GRIM_POOL_ABI = [
+  {
+    type: "function",
+    name: "isKnownRoot",
+    inputs: [{ name: "root", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "nullifierHashes",
+    inputs: [{ name: "", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "addKnownRoot",
+    inputs: [{ name: "root", type: "bytes32" }],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "owner",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
+] as const;
 
 // Pool Helper ABI for swap (routes through PoolManager)
 const POOL_HELPER_ABI = [
@@ -152,12 +185,132 @@ class RelayService {
   }
 
   /**
+   * Check if Merkle root is known by GrimPool
+   */
+  async isRootKnown(root: bigint): Promise<boolean> {
+    const rootBytes32 = `0x${root.toString(16).padStart(64, '0')}` as Hex;
+    try {
+      const isKnown = await this.publicClient.readContract({
+        address: CONTRACTS.GRIM_POOL as Address,
+        abi: GRIM_POOL_ABI,
+        functionName: "isKnownRoot",
+        args: [rootBytes32],
+      });
+      return isKnown as boolean;
+    } catch (error) {
+      logger.warn("Failed to check root:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Check if nullifier has been used
+   */
+  async isNullifierUsed(nullifierHash: bigint): Promise<boolean> {
+    const nullifierBytes32 = `0x${nullifierHash.toString(16).padStart(64, '0')}` as Hex;
+    try {
+      const isUsed = await this.publicClient.readContract({
+        address: CONTRACTS.GRIM_POOL as Address,
+        abi: GRIM_POOL_ABI,
+        functionName: "nullifierHashes",
+        args: [nullifierBytes32],
+      });
+      return isUsed as boolean;
+    } catch (error) {
+      logger.warn("Failed to check nullifier:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Check if relayer is the owner of GrimPool
+   */
+  async isOwner(): Promise<boolean> {
+    try {
+      const owner = await this.publicClient.readContract({
+        address: CONTRACTS.GRIM_POOL as Address,
+        abi: GRIM_POOL_ABI,
+        functionName: "owner",
+      });
+      return (owner as string).toLowerCase() === this.account.address.toLowerCase();
+    } catch (error) {
+      logger.warn("Failed to check owner:", error);
+      return false;
+    }
+  }
+
+  /**
+   * Add a known root to GrimPool (requires owner privileges)
+   */
+  async addKnownRoot(root: bigint): Promise<boolean> {
+    const rootBytes32 = `0x${root.toString(16).padStart(64, '0')}` as Hex;
+    try {
+      const txHash = await this.walletClient.writeContract({
+        address: CONTRACTS.GRIM_POOL as Address,
+        abi: GRIM_POOL_ABI,
+        functionName: "addKnownRoot",
+        args: [rootBytes32],
+      });
+
+      logger.info(`Adding Merkle root ${rootBytes32.slice(0, 20)}... TxHash: ${txHash}`);
+
+      await this.publicClient.waitForTransactionReceipt({
+        hash: txHash,
+        confirmations: 1,
+      });
+
+      logger.info("Merkle root added successfully");
+      return true;
+    } catch (error) {
+      logger.error("Failed to add root:", error);
+      return false;
+    }
+  }
+
+  /**
    * Submit a private swap transaction
    */
   async submitPrivateSwap(params: RelayParams): Promise<RelayResult> {
     const { proof, publicSignals, swapParams } = params;
 
     logger.info("Preparing transaction...");
+
+    // Extract and validate public signals
+    // Order: [0] computedCommitment, [1] computedNullifierHash,
+    // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
+    const merkleRoot = BigInt(publicSignals[2]);
+    const nullifierHash = BigInt(publicSignals[3]);
+
+    // Pre-flight checks
+    logger.info("Checking Merkle root...");
+    let isRootKnown = await this.isRootKnown(merkleRoot);
+
+    if (!isRootKnown) {
+      logger.info("Merkle root not found, checking if relayer can add it...");
+
+      // If relayer is owner, try to add the root
+      const canAddRoot = await this.isOwner();
+      if (canAddRoot) {
+        logger.info("Relayer is owner, adding Merkle root...");
+        const added = await this.addKnownRoot(merkleRoot);
+        if (added) {
+          isRootKnown = true;
+          logger.info("Merkle root added successfully");
+        }
+      }
+
+      if (!isRootKnown) {
+        throw new Error(`InvalidMerkleRoot: Root ${merkleRoot.toString().slice(0, 20)}... is not registered in GrimPool. Relayer cannot add roots (not owner).`);
+      }
+    }
+    logger.info("Merkle root is valid");
+
+    logger.info("Checking nullifier...");
+    const isNullifierUsed = await this.isNullifierUsed(nullifierHash);
+    if (isNullifierUsed) {
+      throw new Error(`NullifierAlreadyUsed: This deposit has already been withdrawn`);
+    }
+    logger.info("Nullifier is valid (not used)");
 
     // Encode hook data
     const hookData = this.encodeHookData(proof, publicSignals);
@@ -225,7 +378,9 @@ class RelayService {
     logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
 
     // Calculate relayer fee (from public signals)
-    const relayerFeeBps = BigInt(publicSignals[4]);
+    // Public signals order: [0] computedCommitment, [1] computedNullifierHash,
+    // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
+    const relayerFeeBps = BigInt(publicSignals[6]);
     const swapAmount = BigInt(swapParams.amountSpecified);
     const relayerFee = (swapAmount * relayerFeeBps) / 10000n;
 
@@ -275,7 +430,9 @@ class RelayService {
     const gasPrice = await this.publicClient.getGasPrice();
     const gasCost = gasEstimate * gasPrice;
 
-    const relayerFeeBps = BigInt(publicSignals[4]);
+    // Public signals order: [0] computedCommitment, [1] computedNullifierHash,
+    // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
+    const relayerFeeBps = BigInt(publicSignals[6]);
     const swapAmount = BigInt(swapParams.amountSpecified);
     const relayerFee = (swapAmount * relayerFeeBps) / 10000n;
 
