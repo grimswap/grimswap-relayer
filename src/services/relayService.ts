@@ -509,7 +509,7 @@ class RelayService {
 
     // Test settings: don't take claims, don't settle using burn
     const testSettings = {
-      takeClaims: false,
+      takeClaims: true,
       settleUsingBurn: false,
     };
 
@@ -720,7 +720,7 @@ class RelayService {
     };
 
     const testSettings = {
-      takeClaims: false,
+      takeClaims: true,
       settleUsingBurn: false,
     };
 
