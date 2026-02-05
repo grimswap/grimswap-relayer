@@ -20,8 +20,31 @@ import {
   type Address,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { readFileSync } from "fs";
+import { join } from "path";
 import { logger } from "../utils/logger.js";
 import { CONTRACTS, CHAIN_CONFIG } from "../utils/constants.js";
+
+// Dynamic import for snarkjs (ESM module)
+let groth16: any = null;
+let verificationKey: any = null;
+
+// Initialize snarkjs and verification key
+async function initSnarkjs() {
+  try {
+    const snarkjs = await import("snarkjs");
+    groth16 = snarkjs.groth16;
+
+    const vKeyPath = join(process.cwd(), "circuits/verification_key.json");
+    verificationKey = JSON.parse(readFileSync(vKeyPath, "utf-8"));
+    logger.info("Verification key and snarkjs loaded successfully");
+  } catch (e) {
+    logger.warn("Could not load snarkjs/verification key:", e);
+  }
+}
+
+// Initialize on module load
+initSnarkjs();
 
 // GrimPool ABI for checking Merkle root and adding roots
 const GRIM_POOL_ABI = [
@@ -185,6 +208,39 @@ class RelayService {
   }
 
   /**
+   * Verify proof locally using snarkjs
+   */
+  async verifyProofLocally(proof: RelayParams["proof"], publicSignals: string[]): Promise<boolean> {
+    if (!verificationKey || !groth16) {
+      logger.warn("snarkjs not loaded, skipping local verification");
+      return true; // Can't verify locally, will rely on on-chain verification
+    }
+
+    try {
+      // Convert proof format for snarkjs
+      const snarkProof = {
+        pi_a: [proof.a[0], proof.a[1], "1"],
+        pi_b: [
+          [proof.b[0][0], proof.b[0][1]],
+          [proof.b[1][0], proof.b[1][1]],
+          ["1", "0"]
+        ],
+        pi_c: [proof.c[0], proof.c[1], "1"],
+        protocol: "groth16",
+        curve: "bn128"
+      };
+
+      logger.info("Calling groth16.verify...");
+      const isValid = await groth16.verify(verificationKey, publicSignals, snarkProof);
+      logger.info(`groth16.verify result: ${isValid}`);
+      return isValid;
+    } catch (error) {
+      logger.error("Local proof verification error:", error);
+      return false;
+    }
+  }
+
+  /**
    * Check if Merkle root is known by GrimPool
    */
   async isRootKnown(root: bigint): Promise<boolean> {
@@ -274,6 +330,14 @@ class RelayService {
     const { proof, publicSignals, swapParams } = params;
 
     logger.info("Preparing transaction...");
+
+    // Verify proof locally first
+    logger.info("Verifying proof locally...");
+    const isLocallyValid = await this.verifyProofLocally(proof, publicSignals);
+    if (!isLocallyValid) {
+      throw new Error("InvalidProof: Proof verification failed locally (snarkjs). The proof is invalid.");
+    }
+    logger.info("Proof is valid locally!");
 
     // Extract and validate public signals
     // Order: [0] computedCommitment, [1] computedNullifierHash,
