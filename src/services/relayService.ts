@@ -313,22 +313,22 @@ class RelayService {
     logger.info("Nullifier is valid (not used)");
 
     // Validate recipient address (should be a valid 20-byte address)
-    const recipient = BigInt(publicSignals[4]);
-    const relayer = BigInt(publicSignals[5]);
-    const relayerFee = BigInt(publicSignals[6]);
+    const recipientSignal = BigInt(publicSignals[4]);
+    const relayerSignal = BigInt(publicSignals[5]);
+    const relayerFeeSignal = BigInt(publicSignals[6]);
 
-    logger.info(`Recipient: ${recipient.toString(16).padStart(40, '0')}`);
-    logger.info(`Relayer: ${relayer.toString(16).padStart(40, '0')}`);
-    logger.info(`Relayer Fee: ${relayerFee} bps`);
+    logger.info(`Recipient: 0x${recipientSignal.toString(16).padStart(40, '0')}`);
+    logger.info(`Relayer: 0x${relayerSignal.toString(16).padStart(40, '0')}`);
+    logger.info(`Relayer Fee: ${relayerFeeSignal} bps`);
 
     // Check if recipient looks valid (should be at least 16 bytes when used as address)
-    if (recipient === 0n) {
+    if (recipientSignal === 0n) {
       throw new Error("InvalidRecipient: Recipient address is zero");
     }
 
     // Check relayer fee
-    if (relayerFee > 1000n) {
-      throw new Error(`InvalidRelayerFee: Fee ${relayerFee} exceeds max 1000 bps`);
+    if (relayerFeeSignal > 1000n) {
+      throw new Error(`InvalidRelayerFee: Fee ${relayerFeeSignal} exceeds max 1000 bps`);
     }
 
     // Encode hook data
