@@ -79,6 +79,13 @@ export const RELAYER_CONFIG = {
 
   // Gas buffer percentage
   GAS_BUFFER_PERCENT: 20,
+
+  // ETH funding for stealth addresses (covers ~2 transactions for claiming)
+  // This enables the stealth address to send tokens without the user needing ETH
+  STEALTH_FUNDING_WEI: BigInt(process.env.STEALTH_FUNDING_WEI || "500000000000000"), // 0.0005 ETH (~$1 worth of gas)
+
+  // Whether to fund stealth addresses after successful swaps
+  ENABLE_STEALTH_FUNDING: process.env.ENABLE_STEALTH_FUNDING !== "false",
 };
 
 // Rate limiting configuration

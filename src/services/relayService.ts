@@ -23,7 +23,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { logger } from "../utils/logger.js";
-import { CONTRACTS, CHAIN_CONFIG } from "../utils/constants.js";
+import { CONTRACTS, CHAIN_CONFIG, RELAYER_CONFIG } from "../utils/constants.js";
 
 // Dynamic import for snarkjs (ESM module)
 let groth16: any = null;
@@ -150,6 +150,8 @@ interface RelayResult {
   blockNumber: bigint;
   gasUsed: bigint;
   relayerFee: string;
+  fundingTxHash?: Hex;
+  recipientAddress: string;
 }
 
 interface EstimateResult {
@@ -310,6 +312,53 @@ class RelayService {
     } catch (error) {
       logger.warn("Failed to check owner:", error);
       return false;
+    }
+  }
+
+  /**
+   * Fund a stealth address with ETH for gas
+   * This allows the recipient to claim tokens without needing ETH
+   */
+  async fundStealthAddress(recipientAddress: Address): Promise<Hex | null> {
+    if (!RELAYER_CONFIG.ENABLE_STEALTH_FUNDING) {
+      logger.info("Stealth funding disabled");
+      return null;
+    }
+
+    const fundingAmount = RELAYER_CONFIG.STEALTH_FUNDING_WEI;
+
+    try {
+      // Check if recipient already has enough ETH
+      const existingBalance = await this.publicClient.getBalance({
+        address: recipientAddress,
+      });
+
+      if (existingBalance >= fundingAmount) {
+        logger.info(`Stealth address ${recipientAddress} already has sufficient ETH: ${existingBalance} wei`);
+        return null;
+      }
+
+      logger.info(`Funding stealth address ${recipientAddress} with ${fundingAmount} wei...`);
+
+      const txHash = await this.walletClient.sendTransaction({
+        to: recipientAddress,
+        value: fundingAmount,
+      });
+
+      logger.info(`Stealth funding tx: ${txHash}`);
+
+      // Wait for confirmation
+      await this.publicClient.waitForTransactionReceipt({
+        hash: txHash,
+        confirmations: 1,
+      });
+
+      logger.info(`Stealth address ${recipientAddress} funded successfully`);
+      return txHash;
+    } catch (error) {
+      logger.error("Failed to fund stealth address:", error);
+      // Don't throw - this is a bonus feature, not critical
+      return null;
     }
   }
 
@@ -546,11 +595,24 @@ class RelayService {
     const swapAmount = BigInt(swapParams.amountSpecified);
     const relayerFee = (swapAmount * relayerFeeBps) / 10000n;
 
+    // Format recipient address
+    const recipientAddress = `0x${recipientSignal.toString(16).padStart(40, '0')}` as Address;
+
+    // Fund the stealth address with ETH for gas (so user can claim tokens)
+    let fundingTxHash: Hex | null = null;
+    try {
+      fundingTxHash = await this.fundStealthAddress(recipientAddress);
+    } catch (fundingError) {
+      logger.warn("Stealth funding failed (non-critical):", fundingError);
+    }
+
     return {
       txHash,
       blockNumber: receipt.blockNumber,
       gasUsed: receipt.gasUsed,
       relayerFee: relayerFee.toString(),
+      fundingTxHash: fundingTxHash ?? undefined,
+      recipientAddress,
     };
   }
 

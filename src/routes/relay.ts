@@ -74,6 +74,9 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
 
     const duration = Date.now() - startTime;
     logger.info(`[${requestId}] Relay successful in ${duration}ms. TxHash: ${result.txHash}`);
+    if (result.fundingTxHash) {
+      logger.info(`[${requestId}] Stealth address funded. TxHash: ${result.fundingTxHash}`);
+    }
 
     res.json({
       success: true,
@@ -81,6 +84,8 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
       blockNumber: result.blockNumber.toString(),
       gasUsed: result.gasUsed.toString(),
       relayerFee: result.relayerFee,
+      fundingTxHash: result.fundingTxHash,
+      recipientAddress: result.recipientAddress,
       requestId,
     });
   } catch (error) {
