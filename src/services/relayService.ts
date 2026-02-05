@@ -19,6 +19,30 @@ import {
   type Hex,
   type Address,
 } from "viem";
+
+// ERC20 ABI for USDC transfer
+const ERC20_ABI = [
+  {
+    type: "function",
+    name: "transfer",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+  {
+    type: "function",
+    name: "balanceOf",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+] as const;
+
+// USDC address on Unichain Sepolia
+const USDC_ADDRESS = "0x31d0220469e10c4E71834a79b1f276d740d3768F" as Address;
 import { privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -152,6 +176,8 @@ interface RelayResult {
   relayerFee: string;
   fundingTxHash?: Hex;
   recipientAddress: string;
+  usdcTransferred?: string;
+  usdcTransferTxHash?: Hex;
 }
 
 interface EstimateResult {
@@ -570,6 +596,15 @@ class RelayService {
     // Add 20% buffer to gas estimate
     const gasLimit = (gasEstimate * 120n) / 100n;
 
+    // Get relayer's USDC balance BEFORE the swap
+    const usdcBalanceBefore = await this.publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [this.account.address],
+    }) as bigint;
+    logger.info(`Relayer USDC balance before swap: ${usdcBalanceBefore}`);
+
     // Submit transaction using PoolSwapTest
     const txHash = await this.walletClient.sendTransaction({
       to: poolSwapTestAddress,
@@ -588,15 +623,58 @@ class RelayService {
 
     logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
 
+    // Format recipient address (stealth address from ZK proof)
+    const recipientAddress = `0x${recipientSignal.toString(16).padStart(40, '0')}` as Address;
+
+    // Get relayer's USDC balance AFTER the swap
+    const usdcBalanceAfter = await this.publicClient.readContract({
+      address: USDC_ADDRESS,
+      abi: ERC20_ABI,
+      functionName: "balanceOf",
+      args: [this.account.address],
+    }) as bigint;
+    logger.info(`Relayer USDC balance after swap: ${usdcBalanceAfter}`);
+
+    // Calculate the USDC received from the swap
+    const usdcReceived = usdcBalanceAfter - usdcBalanceBefore;
+    logger.info(`USDC received from swap: ${usdcReceived}`);
+
+    // Transfer the USDC to the recipient (stealth address)
+    let transferTxHash: Hex | null = null;
+    if (usdcReceived > 0n) {
+      logger.info(`Transferring ${usdcReceived} USDC to recipient ${recipientAddress}...`);
+
+      try {
+        transferTxHash = await this.walletClient.writeContract({
+          address: USDC_ADDRESS,
+          abi: ERC20_ABI,
+          functionName: "transfer",
+          args: [recipientAddress, usdcReceived],
+        });
+
+        logger.info(`USDC transfer tx: ${transferTxHash}`);
+
+        // Wait for transfer confirmation
+        await this.publicClient.waitForTransactionReceipt({
+          hash: transferTxHash,
+          confirmations: 1,
+        });
+
+        logger.info(`USDC transfer confirmed to ${recipientAddress}`);
+      } catch (transferError) {
+        logger.error("Failed to transfer USDC to recipient:", transferError);
+        throw new Error(`Swap succeeded but USDC transfer failed: ${transferError}`);
+      }
+    } else {
+      logger.warn("No USDC received from swap - something went wrong!");
+    }
+
     // Calculate relayer fee (from public signals)
     // Public signals order: [0] computedCommitment, [1] computedNullifierHash,
     // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
     const relayerFeeBps = BigInt(publicSignals[6]);
     const swapAmount = BigInt(swapParams.amountSpecified);
     const relayerFee = (swapAmount * relayerFeeBps) / 10000n;
-
-    // Format recipient address
-    const recipientAddress = `0x${recipientSignal.toString(16).padStart(40, '0')}` as Address;
 
     // Fund the stealth address with ETH for gas (so user can claim tokens)
     let fundingTxHash: Hex | null = null;
@@ -613,6 +691,8 @@ class RelayService {
       relayerFee: relayerFee.toString(),
       fundingTxHash: fundingTxHash ?? undefined,
       recipientAddress,
+      usdcTransferred: usdcReceived.toString(),
+      usdcTransferTxHash: transferTxHash ?? undefined,
     };
   }
 
