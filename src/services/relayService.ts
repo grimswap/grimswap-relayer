@@ -531,18 +531,12 @@ class RelayService {
     logger.info(`Pool: ${poolKey.currency0} -> ${poolKey.currency1}`);
     logger.info(`Amount: ${swapParams.amountSpecified}, zeroForOne: ${swapParams.zeroForOne}`);
 
-    // Check if swapping native ETH (currency0 = 0x000...000)
-    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
-    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
-      ? -BigInt(swapParams.amountSpecified)
-      : BigInt(swapParams.amountSpecified);
+    // For ZK private swaps, the ETH comes from deposited funds in GrimPool, NOT from the relayer.
+    // The relayer only pays gas fees - the swap uses the user's previously deposited commitment.
+    // The GrimSwapZK hook handles settling the swap using the pool's internal accounting.
+    const ethValue = 0n;
 
-    // If swapping ETH -> token (zeroForOne = true), need to send ETH value
-    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
-
-    if (ethValue > 0n) {
-      logger.info(`Native ETH swap detected, will send ${ethValue} wei`);
-    }
+    logger.info("ZK private swap - relayer pays gas only, ETH comes from deposited commitment");
 
     // Estimate gas with better error handling
     let gasEstimate: bigint;
@@ -726,12 +720,8 @@ class RelayService {
 
     const poolSwapTestAddress = CONTRACTS.POOL_SWAP_TEST as Address;
 
-    // Check if swapping native ETH
-    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
-    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
-      ? -BigInt(swapParams.amountSpecified)
-      : BigInt(swapParams.amountSpecified);
-    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
+    // For ZK private swaps, relayer pays gas only - ETH comes from deposited commitment
+    const ethValue = 0n;
 
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
