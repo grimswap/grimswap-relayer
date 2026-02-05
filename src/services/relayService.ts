@@ -220,11 +220,12 @@ class RelayService {
    */
   private encodeHookData(proof: RelayParams["proof"], publicSignals: string[]): Hex {
     // Convert proof to contract format
+    // NOTE: The proof received from frontend is ALREADY swapped for Solidity
+    // We should NOT swap again here - use the coordinates as-is
     const pA: [bigint, bigint] = [BigInt(proof.a[0]), BigInt(proof.a[1])];
-    // Note: pB needs to be swapped for the contract format
     const pB: [[bigint, bigint], [bigint, bigint]] = [
-      [BigInt(proof.b[0][1]), BigInt(proof.b[0][0])],
-      [BigInt(proof.b[1][1]), BigInt(proof.b[1][0])],
+      [BigInt(proof.b[0][0]), BigInt(proof.b[0][1])], // Use as-is, already swapped by frontend
+      [BigInt(proof.b[1][0]), BigInt(proof.b[1][1])], // Use as-is, already swapped by frontend
     ];
     const pC: [bigint, bigint] = [BigInt(proof.c[0]), BigInt(proof.c[1])];
     const signals = publicSignals.map((s) => BigInt(s)) as [bigint, bigint, bigint, bigint, bigint, bigint, bigint, bigint];
@@ -249,11 +250,13 @@ class RelayService {
 
     try {
       // Convert proof format for snarkjs
+      // NOTE: The proof received from frontend has pi_b coordinates SWAPPED for Solidity
+      // We need to UNSWAP them back to the original snarkjs format for verification
       const snarkProof = {
         pi_a: [proof.a[0], proof.a[1], "1"],
         pi_b: [
-          [proof.b[0][0], proof.b[0][1]],
-          [proof.b[1][0], proof.b[1][1]],
+          [proof.b[0][1], proof.b[0][0]], // UNSWAP: frontend swapped [1,0] -> [0,1], so reverse
+          [proof.b[1][1], proof.b[1][0]], // UNSWAP: frontend swapped [1,0] -> [0,1], so reverse
           ["1", "0"]
         ],
         pi_c: [proof.c[0], proof.c[1], "1"],
