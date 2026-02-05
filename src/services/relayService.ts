@@ -312,6 +312,25 @@ class RelayService {
     }
     logger.info("Nullifier is valid (not used)");
 
+    // Validate recipient address (should be a valid 20-byte address)
+    const recipient = BigInt(publicSignals[4]);
+    const relayer = BigInt(publicSignals[5]);
+    const relayerFee = BigInt(publicSignals[6]);
+
+    logger.info(`Recipient: ${recipient.toString(16).padStart(40, '0')}`);
+    logger.info(`Relayer: ${relayer.toString(16).padStart(40, '0')}`);
+    logger.info(`Relayer Fee: ${relayerFee} bps`);
+
+    // Check if recipient looks valid (should be at least 16 bytes when used as address)
+    if (recipient === 0n) {
+      throw new Error("InvalidRecipient: Recipient address is zero");
+    }
+
+    // Check relayer fee
+    if (relayerFee > 1000n) {
+      throw new Error(`InvalidRelayerFee: Fee ${relayerFee} exceeds max 1000 bps`);
+    }
+
     // Encode hook data
     const hookData = this.encodeHookData(proof, publicSignals);
 
@@ -326,23 +345,67 @@ class RelayService {
 
     const poolHelperAddress = CONTRACTS.POOL_HELPER as Address;
 
-    // Estimate gas
-    const gasEstimate = await this.publicClient.estimateGas({
-      account: this.account.address,
-      to: poolHelperAddress,
-      data: encodeFunctionData({
-        abi: POOL_HELPER_ABI,
-        functionName: "swap",
-        args: [
-          poolKey,
-          swapParams.zeroForOne,
-          BigInt(swapParams.amountSpecified),
-          BigInt(swapParams.sqrtPriceLimitX96),
-          hookData,
-          this.account.address, // from address (relayer)
-        ],
-      }),
+    const swapData = encodeFunctionData({
+      abi: POOL_HELPER_ABI,
+      functionName: "swap",
+      args: [
+        poolKey,
+        swapParams.zeroForOne,
+        BigInt(swapParams.amountSpecified),
+        BigInt(swapParams.sqrtPriceLimitX96),
+        hookData,
+        this.account.address, // from address (relayer)
+      ],
     });
+
+    logger.info("Swap call data prepared, estimating gas...");
+    logger.info(`Pool: ${poolKey.currency0} -> ${poolKey.currency1}`);
+    logger.info(`Amount: ${swapParams.amountSpecified}, zeroForOne: ${swapParams.zeroForOne}`);
+
+    // Estimate gas with better error handling
+    let gasEstimate: bigint;
+    try {
+      gasEstimate = await this.publicClient.estimateGas({
+        account: this.account.address,
+        to: poolHelperAddress,
+        data: swapData,
+      });
+    } catch (estimateError: any) {
+      // Try to simulate the call to get more error details
+      logger.error("Gas estimation failed, attempting simulation...");
+
+      try {
+        await this.publicClient.call({
+          account: this.account.address,
+          to: poolHelperAddress,
+          data: swapData,
+        });
+      } catch (callError: any) {
+        const errorMsg = callError?.message || callError?.toString() || "Unknown error";
+
+        // Check for known contract errors
+        if (errorMsg.includes("InvalidProof")) {
+          throw new Error("InvalidProof: ZK proof verification failed in Groth16Verifier");
+        }
+        if (errorMsg.includes("InvalidMerkleRoot")) {
+          throw new Error("InvalidMerkleRoot: Merkle root not recognized by GrimPool");
+        }
+        if (errorMsg.includes("NullifierAlreadyUsed")) {
+          throw new Error("NullifierAlreadyUsed: This deposit has already been spent");
+        }
+        if (errorMsg.includes("InvalidRecipient")) {
+          throw new Error("InvalidRecipient: Recipient address is invalid");
+        }
+        if (errorMsg.includes("InvalidRelayerFee")) {
+          throw new Error("InvalidRelayerFee: Relayer fee exceeds maximum");
+        }
+
+        logger.error("Call simulation error:", errorMsg);
+      }
+
+      // Re-throw original error with more context
+      throw new Error(`Contract reverted: ${estimateError?.shortMessage || estimateError?.message || "Unknown reason"}. Check proof validity and contract state.`);
+    }
 
     logger.info(`Gas estimate: ${gasEstimate}`);
 
