@@ -426,6 +426,19 @@ class RelayService {
     logger.info(`Pool: ${poolKey.currency0} -> ${poolKey.currency1}`);
     logger.info(`Amount: ${swapParams.amountSpecified}, zeroForOne: ${swapParams.zeroForOne}`);
 
+    // Check if swapping native ETH (currency0 = 0x000...000)
+    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
+    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
+      ? -BigInt(swapParams.amountSpecified)
+      : BigInt(swapParams.amountSpecified);
+
+    // If swapping ETH -> token (zeroForOne = true), need to send ETH value
+    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
+
+    if (ethValue > 0n) {
+      logger.info(`Native ETH swap detected, will send ${ethValue} wei`);
+    }
+
     // Estimate gas with better error handling
     let gasEstimate: bigint;
     try {
@@ -433,6 +446,7 @@ class RelayService {
         account: this.account.address,
         to: poolHelperAddress,
         data: swapData,
+        value: ethValue,
       });
     } catch (estimateError: any) {
       // Try to simulate the call to get more error details
@@ -443,6 +457,7 @@ class RelayService {
           account: this.account.address,
           to: poolHelperAddress,
           data: swapData,
+          value: ethValue,
         });
       } catch (callError: any) {
         const errorMsg = callError?.message || callError?.toString() || "Unknown error";
@@ -492,6 +507,7 @@ class RelayService {
         ],
       }),
       gas: gasLimit,
+      value: ethValue,
     });
 
     logger.info(`Transaction submitted: ${txHash}`);
