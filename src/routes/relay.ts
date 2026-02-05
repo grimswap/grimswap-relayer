@@ -74,9 +74,7 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
 
     const duration = Date.now() - startTime;
     logger.info(`[${requestId}] Relay successful in ${duration}ms. TxHash: ${result.txHash}`);
-    if (result.usdcTransferred) {
-      logger.info(`[${requestId}] USDC transferred: ${result.usdcTransferred} to ${result.recipientAddress}. TxHash: ${result.usdcTransferTxHash}`);
-    }
+    logger.info(`[${requestId}] Output routed to stealth: ${result.recipientAddress}`);
     if (result.fundingTxHash) {
       logger.info(`[${requestId}] Stealth address funded with ETH. TxHash: ${result.fundingTxHash}`);
     }
@@ -89,8 +87,6 @@ relayRouter.post("/", validateRelayRequest, async (req: Request, res: Response) 
       relayerFee: result.relayerFee,
       fundingTxHash: result.fundingTxHash,
       recipientAddress: result.recipientAddress,
-      usdcTransferred: result.usdcTransferred,
-      usdcTransferTxHash: result.usdcTransferTxHash,
       requestId,
     });
   } catch (error) {

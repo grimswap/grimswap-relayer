@@ -102,11 +102,11 @@ const GRIM_POOL_ABI = [
   },
 ] as const;
 
-// PoolSwapTest ABI for swap (supports native ETH via payable)
-const POOL_SWAP_TEST_ABI = [
+// GrimSwapRouter ABI for production private swaps
+const GRIM_SWAP_ROUTER_ABI = [
   {
     type: "function",
-    name: "swap",
+    name: "executePrivateSwap",
     inputs: [
       {
         name: "key",
@@ -128,23 +128,10 @@ const POOL_SWAP_TEST_ABI = [
           { name: "sqrtPriceLimitX96", type: "uint160" },
         ],
       },
-      {
-        name: "testSettings",
-        type: "tuple",
-        components: [
-          { name: "takeClaims", type: "bool" },
-          { name: "settleUsingBurn", type: "bool" },
-        ],
-      },
       { name: "hookData", type: "bytes" },
     ],
-    outputs: [
-      {
-        name: "delta",
-        type: "int256",
-      },
-    ],
-    stateMutability: "payable",
+    outputs: [],
+    stateMutability: "nonpayable",
   },
 ] as const;
 
@@ -176,8 +163,6 @@ interface RelayResult {
   relayerFee: string;
   fundingTxHash?: Hex;
   recipientAddress: string;
-  usdcTransferred?: string;
-  usdcTransferTxHash?: Hex;
 }
 
 interface EstimateResult {
@@ -500,75 +485,49 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    // Prepare swap params for PoolSwapTest
-    const swapTestParams = {
+    // Prepare swap params
+    const routerSwapParams = {
       zeroForOne: swapParams.zeroForOne,
       amountSpecified: BigInt(swapParams.amountSpecified),
       sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
     };
 
-    // Test settings: don't take claims, don't settle using burn
-    const testSettings = {
-      takeClaims: true,
-      settleUsingBurn: false,
-    };
-
-    // Use PoolSwapTest instead of PoolHelper (supports native ETH via payable)
-    const poolSwapTestAddress = CONTRACTS.POOL_SWAP_TEST as Address;
+    // Use GrimSwapRouter for production private swaps
+    // Router atomically: releases ETH from GrimPool -> swaps via Uniswap v4
+    // If ZK proof is invalid, entire tx reverts (including ETH release)
+    const routerAddress = CONTRACTS.GRIM_SWAP_ROUTER as Address;
 
     const swapData = encodeFunctionData({
-      abi: POOL_SWAP_TEST_ABI,
-      functionName: "swap",
-      args: [
-        poolKey,
-        swapTestParams,
-        testSettings,
-        hookData,
-      ],
+      abi: GRIM_SWAP_ROUTER_ABI,
+      functionName: "executePrivateSwap",
+      args: [poolKey, routerSwapParams, hookData],
     });
 
-    logger.info("Swap call data prepared, estimating gas...");
+    logger.info("Router call data prepared, estimating gas...");
     logger.info(`Pool: ${poolKey.currency0} -> ${poolKey.currency1}`);
     logger.info(`Amount: ${swapParams.amountSpecified}, zeroForOne: ${swapParams.zeroForOne}`);
+    logger.info(`Router: ${routerAddress}`);
 
-    // Check if swapping native ETH (currency0 = 0x000...000)
-    // For ZK swaps: relayer fronts the ETH, gets reimbursed from GrimPool deposits
-    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
-    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
-      ? -BigInt(swapParams.amountSpecified)
-      : BigInt(swapParams.amountSpecified);
-
-    // If swapping ETH -> token (zeroForOne = true), relayer provides ETH
-    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
-
-    if (ethValue > 0n) {
-      logger.info(`ZK swap: relayer fronting ${ethValue} wei (will be reimbursed from GrimPool)`);
-    }
-
-    // Estimate gas with better error handling
+    // Estimate gas with error handling
     let gasEstimate: bigint;
     try {
       gasEstimate = await this.publicClient.estimateGas({
         account: this.account.address,
-        to: poolSwapTestAddress,
+        to: routerAddress,
         data: swapData,
-        value: ethValue,
       });
     } catch (estimateError: any) {
-      // Try to simulate the call to get more error details
       logger.error("Gas estimation failed, attempting simulation...");
 
       try {
         await this.publicClient.call({
           account: this.account.address,
-          to: poolSwapTestAddress,
+          to: routerAddress,
           data: swapData,
-          value: ethValue,
         });
       } catch (callError: any) {
         const errorMsg = callError?.message || callError?.toString() || "Unknown error";
 
-        // Check for known contract errors
         if (errorMsg.includes("InvalidProof")) {
           throw new Error("InvalidProof: ZK proof verification failed in Groth16Verifier");
         }
@@ -584,100 +543,58 @@ class RelayService {
         if (errorMsg.includes("InvalidRelayerFee")) {
           throw new Error("InvalidRelayerFee: Relayer fee exceeds maximum");
         }
+        if (errorMsg.includes("InsufficientPoolBalance")) {
+          throw new Error("InsufficientPoolBalance: GrimPool doesn't have enough ETH. User needs to deposit first.");
+        }
+        if (errorMsg.includes("Unauthorized")) {
+          throw new Error("Unauthorized: GrimSwapRouter is not authorized on GrimPool. Admin needs to call setAuthorizedRouter().");
+        }
 
         logger.error("Call simulation error:", errorMsg);
       }
 
-      // Re-throw original error with more context
       throw new Error(`Contract reverted: ${estimateError?.shortMessage || estimateError?.message || "Unknown reason"}. Check proof validity and contract state.`);
     }
 
     logger.info(`Gas estimate: ${gasEstimate}`);
 
-    // Add 20% buffer to gas estimate
+    // Add 20% buffer
     const gasLimit = (gasEstimate * 120n) / 100n;
 
-    // Get relayer's USDC balance BEFORE the swap
-    const usdcBalanceBefore = await this.publicClient.readContract({
-      address: USDC_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [this.account.address],
-    }) as bigint;
-    logger.info(`Relayer USDC balance before swap: ${usdcBalanceBefore}`);
-
-    // Submit transaction using PoolSwapTest
+    // Submit transaction via GrimSwapRouter
     const txHash = await this.walletClient.sendTransaction({
-      to: poolSwapTestAddress,
+      to: routerAddress,
       data: swapData,
       gas: gasLimit,
-      value: ethValue,
     });
 
     logger.info(`Transaction submitted: ${txHash}`);
 
-    // Wait for confirmation
+    // Wait for confirmation via receipt (no arbitrary timeouts)
     const receipt = await this.publicClient.waitForTransactionReceipt({
       hash: txHash,
       confirmations: 1,
     });
 
-    logger.info(`Transaction confirmed in block ${receipt.blockNumber}`);
+    logger.info(`Transaction confirmed in block ${receipt.blockNumber}, status: ${receipt.status}`);
+
+    if (receipt.status === "reverted") {
+      throw new Error("Transaction reverted on-chain. Check contract state.");
+    }
 
     // Format recipient address (stealth address from ZK proof)
     const recipientAddress = `0x${recipientSignal.toString(16).padStart(40, '0')}` as Address;
 
-    // Get relayer's USDC balance AFTER the swap
-    const usdcBalanceAfter = await this.publicClient.readContract({
-      address: USDC_ADDRESS,
-      abi: ERC20_ABI,
-      functionName: "balanceOf",
-      args: [this.account.address],
-    }) as bigint;
-    logger.info(`Relayer USDC balance after swap: ${usdcBalanceAfter}`);
+    // With GrimSwapRouter + GrimSwapZK hook, output tokens go DIRECTLY to stealth address
+    // No need for relayer to receive and forward tokens
+    logger.info(`Swap output routed directly to stealth address: ${recipientAddress}`);
 
-    // Calculate the USDC received from the swap
-    const usdcReceived = usdcBalanceAfter - usdcBalanceBefore;
-    logger.info(`USDC received from swap: ${usdcReceived}`);
-
-    // Transfer the USDC to the recipient (stealth address)
-    let transferTxHash: Hex | null = null;
-    if (usdcReceived > 0n) {
-      logger.info(`Transferring ${usdcReceived} USDC to recipient ${recipientAddress}...`);
-
-      try {
-        transferTxHash = await this.walletClient.writeContract({
-          address: USDC_ADDRESS,
-          abi: ERC20_ABI,
-          functionName: "transfer",
-          args: [recipientAddress, usdcReceived],
-        });
-
-        logger.info(`USDC transfer tx: ${transferTxHash}`);
-
-        // Wait for transfer confirmation
-        await this.publicClient.waitForTransactionReceipt({
-          hash: transferTxHash,
-          confirmations: 1,
-        });
-
-        logger.info(`USDC transfer confirmed to ${recipientAddress}`);
-      } catch (transferError) {
-        logger.error("Failed to transfer USDC to recipient:", transferError);
-        throw new Error(`Swap succeeded but USDC transfer failed: ${transferError}`);
-      }
-    } else {
-      logger.warn("No USDC received from swap - something went wrong!");
-    }
-
-    // Calculate relayer fee (from public signals)
-    // Public signals order: [0] computedCommitment, [1] computedNullifierHash,
-    // [2] merkleRoot, [3] nullifierHash, [4] recipient, [5] relayer, [6] relayerFee, [7] swapAmountOut
+    // Calculate relayer fee from public signals
     const relayerFeeBps = BigInt(publicSignals[6]);
     const swapAmount = BigInt(swapParams.amountSpecified);
     const relayerFee = (swapAmount * relayerFeeBps) / 10000n;
 
-    // Fund the stealth address with ETH for gas (so user can claim tokens)
+    // Fund stealth address with ETH for gas (so user can move received tokens)
     let fundingTxHash: Hex | null = null;
     try {
       fundingTxHash = await this.fundStealthAddress(recipientAddress);
@@ -692,8 +609,6 @@ class RelayService {
       relayerFee: relayerFee.toString(),
       fundingTxHash: fundingTxHash ?? undefined,
       recipientAddress,
-      usdcTransferred: usdcReceived.toString(),
-      usdcTransferTxHash: transferTxHash ?? undefined,
     };
   }
 
@@ -713,41 +628,22 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    // Prepare swap params for PoolSwapTest
-    const swapTestParams = {
+    const routerSwapParams = {
       zeroForOne: swapParams.zeroForOne,
       amountSpecified: BigInt(swapParams.amountSpecified),
       sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
     };
 
-    const testSettings = {
-      takeClaims: true,
-      settleUsingBurn: false,
-    };
-
-    const poolSwapTestAddress = CONTRACTS.POOL_SWAP_TEST as Address;
-
-    // Check if swapping native ETH - relayer fronts the ETH
-    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
-    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
-      ? -BigInt(swapParams.amountSpecified)
-      : BigInt(swapParams.amountSpecified);
-    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
+    const routerAddress = CONTRACTS.GRIM_SWAP_ROUTER as Address;
 
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
-      to: poolSwapTestAddress,
+      to: routerAddress,
       data: encodeFunctionData({
-        abi: POOL_SWAP_TEST_ABI,
-        functionName: "swap",
-        args: [
-          poolKey,
-          swapTestParams,
-          testSettings,
-          hookData,
-        ],
+        abi: GRIM_SWAP_ROUTER_ABI,
+        functionName: "executePrivateSwap",
+        args: [poolKey, routerSwapParams, hookData],
       }),
-      value: ethValue,
     });
 
     const gasPrice = await this.publicClient.getGasPrice();

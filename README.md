@@ -1,155 +1,120 @@
 # GrimSwap Relayer
 
-HTTP service that accepts ZK proofs and submits private swap transactions to the blockchain, hiding user identity by paying gas on their behalf.
+Gas relayer service for GrimSwap private swaps. Submits transactions on behalf of users so their wallet address never appears on-chain.
 
-## Why a Relayer?
+## How It Works
 
-Without a relayer, even with valid ZK proofs, the user's identity is leaked through the gas payment:
+1. User generates ZK proof client-side
+2. User sends proof + swap params to relayer API
+3. Relayer validates proof, calls `GrimSwapRouter.executePrivateSwap()`
+4. Router atomically: releases ETH from GrimPool -> swaps on Uniswap v4
+5. GrimSwapZK hook verifies proof and routes output to stealth address
+6. Relayer optionally funds stealth address with ETH for gas
 
+## Setup
+
+```bash
+npm install
+cp .env.example .env
+# Edit .env with your relayer private key
 ```
-❌ Without Relayer:
-User submits tx → User pays gas → tx.origin = User's address → Privacy broken!
 
-✅ With Relayer:
-User sends proof to Relayer → Relayer submits tx → tx.origin = Relayer → Privacy preserved!
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RELAYER_PRIVATE_KEY` | Relayer wallet private key (required) | - |
+| `RPC_URL` | Unichain RPC endpoint | `https://sepolia.unichain.org` |
+| `PORT` | Server port | `3001` |
+| `RELAYER_FEE_BPS` | Fee in basis points | `10` (0.1%) |
+| `ENABLE_STEALTH_FUNDING` | Fund stealth addresses with ETH | `true` |
+| `STEALTH_FUNDING_WEI` | ETH to send to stealth addresses | `500000000000000` (0.0005 ETH) |
+
+## Running
+
+```bash
+# Development
+npm run dev
+
+# Production
+npm start
 ```
 
 ## API Endpoints
 
-### POST /relay
+### `GET /health`
+Health check.
 
-Submit a private swap transaction.
+### `GET /info`
+Returns relayer address and configuration.
 
+### `POST /relay`
+Submit a private swap.
+
+**Request body:**
 ```json
 {
   "proof": {
-    "a": ["0x...", "0x..."],
-    "b": [["0x...", "0x..."], ["0x...", "0x..."]],
-    "c": ["0x...", "0x..."]
+    "a": ["<uint256>", "<uint256>"],
+    "b": [["<uint256>", "<uint256>"], ["<uint256>", "<uint256>"]],
+    "c": ["<uint256>", "<uint256>"]
   },
-  "publicSignals": [
-    "merkleRoot",
-    "nullifierHash",
-    "recipient",
-    "relayer",
-    "relayerFee",
-    "swapAmountOut"
-  ],
+  "publicSignals": ["<signal0>", ..., "<signal7>"],
   "swapParams": {
     "poolKey": {
-      "currency0": "0x...",
-      "currency1": "0x...",
+      "currency0": "0x0000000000000000000000000000000000000000",
+      "currency1": "<token_address>",
       "fee": 3000,
       "tickSpacing": 60,
-      "hooks": "0x..."
+      "hooks": "0xeB72E2495640a4B83EBfc4618FD91cc9beB640c4"
     },
     "zeroForOne": true,
-    "amountSpecified": "1000000000000000000",
-    "sqrtPriceLimitX96": "0"
+    "amountSpecified": "-1000000000000000",
+    "sqrtPriceLimitX96": "4295128740"
   }
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "success": true,
   "txHash": "0x...",
   "blockNumber": 12345,
-  "gasUsed": "250000",
-  "relayerFee": "1000000000000000"
+  "gasUsed": 499760
 }
 ```
 
-### GET /status/:txHash
+### Public Signals Order
 
-Check transaction status.
+| Index | Signal | Description |
+|-------|--------|-------------|
+| 0 | computedCommitment | Circuit output |
+| 1 | computedNullifierHash | Circuit output |
+| 2 | merkleRoot | Poseidon Merkle tree root |
+| 3 | nullifierHash | Prevents double-spend |
+| 4 | recipient | Stealth address |
+| 5 | relayer | Relayer address |
+| 6 | relayerFee | Fee in basis points |
+| 7 | swapAmountOut | Deposit amount |
 
-```json
-{
-  "status": "confirmed",
-  "blockNumber": "12345",
-  "gasUsed": "250000"
-}
-```
+## Contract Addresses (Unichain Sepolia)
 
-### GET /fee
+| Contract | Address |
+|----------|---------|
+| GrimPool | `0xEAB5E7B4e715A22E8c114B7476eeC15770B582bb` |
+| GrimSwapZK (Hook) | `0xeB72E2495640a4B83EBfc4618FD91cc9beB640c4` |
+| GrimSwapRouter | `0xC13a6a504da21aD23c748f08d3E991621D42DA4F` |
+| Groth16Verifier | `0xF7D14b744935cE34a210D7513471a8E6d6e696a0` |
+| PoolSwapTest | `0x9140a78c1A137c7fF1c151EC8231272aF78a99A4` |
 
-Get current fee information.
+## Features
 
-```json
-{
-  "relayerFeeBps": 10,
-  "relayerFeePercent": 0.1,
-  "gasPrice": "1000000",
-  "estimatedGas": "250000"
-}
-```
-
-### GET /fee/quote?amount=1000000000000000000
-
-Get fee quote for specific amount.
-
-```json
-{
-  "inputAmount": "1000000000000000000",
-  "relayerFee": "1000000000000000",
-  "netAmount": "999000000000000000"
-}
-```
-
-## Installation
-
-```bash
-npm install
-```
-
-## Configuration
-
-Copy `.env.example` to `.env` and configure:
-
-```bash
-cp .env.example .env
-```
-
-Required environment variables:
-- `RELAYER_PRIVATE_KEY` - Private key for relayer wallet (must have ETH for gas)
-- `RPC_URL` - RPC endpoint for Unichain
-
-## Running
-
-Development:
-```bash
-npm run dev
-```
-
-Production:
-```bash
-npm run build
-npm start
-```
-
-## Security
-
-- Rate limiting: 10 requests/minute per IP
-- Request validation: All inputs are validated
-- Helmet: Security headers enabled
-- CORS: Configurable allowed origins
-
-## Gas Requirements
-
-The relayer wallet needs ETH to pay for gas. Monitor the balance:
-
-```bash
-curl http://localhost:3001/status/relayer/info
-```
-
-## Docker
-
-```bash
-docker build -t grimswap-relayer .
-docker run -p 3001:3001 --env-file .env grimswap-relayer
-```
+- Auto-adds Merkle root if relayer is GrimPool owner (testnet)
+- Funds stealth addresses with ETH for token claiming
+- Rate limiting per IP
+- Request validation
+- Detailed error responses
 
 ## License
 
