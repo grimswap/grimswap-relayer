@@ -78,8 +78,8 @@ const GRIM_POOL_ABI = [
   },
 ] as const;
 
-// Pool Helper ABI for swap (routes through PoolManager)
-const POOL_HELPER_ABI = [
+// PoolSwapTest ABI for swap (supports native ETH via payable)
+const POOL_SWAP_TEST_ABI = [
   {
     type: "function",
     name: "swap",
@@ -95,14 +95,32 @@ const POOL_HELPER_ABI = [
           { name: "hooks", type: "address" },
         ],
       },
-      { name: "zeroForOne", type: "bool" },
-      { name: "amountSpecified", type: "int256" },
-      { name: "sqrtPriceLimitX96", type: "uint160" },
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "zeroForOne", type: "bool" },
+          { name: "amountSpecified", type: "int256" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+      {
+        name: "testSettings",
+        type: "tuple",
+        components: [
+          { name: "takeClaims", type: "bool" },
+          { name: "settleUsingBurn", type: "bool" },
+        ],
+      },
       { name: "hookData", type: "bytes" },
-      { name: "from", type: "address" },
     ],
-    outputs: [{ name: "delta", type: "int256" }],
-    stateMutability: "nonpayable",
+    outputs: [
+      {
+        name: "delta",
+        type: "int256",
+      },
+    ],
+    stateMutability: "payable",
   },
 ] as const;
 
@@ -407,18 +425,30 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    const poolHelperAddress = CONTRACTS.POOL_HELPER as Address;
+    // Prepare swap params for PoolSwapTest
+    const swapTestParams = {
+      zeroForOne: swapParams.zeroForOne,
+      amountSpecified: BigInt(swapParams.amountSpecified),
+      sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
+    };
+
+    // Test settings: don't take claims, don't settle using burn
+    const testSettings = {
+      takeClaims: false,
+      settleUsingBurn: false,
+    };
+
+    // Use PoolSwapTest instead of PoolHelper (supports native ETH via payable)
+    const poolSwapTestAddress = CONTRACTS.POOL_SWAP_TEST as Address;
 
     const swapData = encodeFunctionData({
-      abi: POOL_HELPER_ABI,
+      abi: POOL_SWAP_TEST_ABI,
       functionName: "swap",
       args: [
         poolKey,
-        swapParams.zeroForOne,
-        BigInt(swapParams.amountSpecified),
-        BigInt(swapParams.sqrtPriceLimitX96),
+        swapTestParams,
+        testSettings,
         hookData,
-        this.account.address, // from address (relayer)
       ],
     });
 
@@ -444,7 +474,7 @@ class RelayService {
     try {
       gasEstimate = await this.publicClient.estimateGas({
         account: this.account.address,
-        to: poolHelperAddress,
+        to: poolSwapTestAddress,
         data: swapData,
         value: ethValue,
       });
@@ -455,7 +485,7 @@ class RelayService {
       try {
         await this.publicClient.call({
           account: this.account.address,
-          to: poolHelperAddress,
+          to: poolSwapTestAddress,
           data: swapData,
           value: ethValue,
         });
@@ -491,21 +521,10 @@ class RelayService {
     // Add 20% buffer to gas estimate
     const gasLimit = (gasEstimate * 120n) / 100n;
 
-    // Submit transaction
+    // Submit transaction using PoolSwapTest
     const txHash = await this.walletClient.sendTransaction({
-      to: poolHelperAddress,
-      data: encodeFunctionData({
-        abi: POOL_HELPER_ABI,
-        functionName: "swap",
-        args: [
-          poolKey,
-          swapParams.zeroForOne,
-          BigInt(swapParams.amountSpecified),
-          BigInt(swapParams.sqrtPriceLimitX96),
-          hookData,
-          this.account.address,
-        ],
-      }),
+      to: poolSwapTestAddress,
+      data: swapData,
       gas: gasLimit,
       value: ethValue,
     });
@@ -551,23 +570,41 @@ class RelayService {
       hooks: swapParams.poolKey.hooks as Address,
     };
 
-    const poolHelperAddress = CONTRACTS.POOL_HELPER as Address;
+    // Prepare swap params for PoolSwapTest
+    const swapTestParams = {
+      zeroForOne: swapParams.zeroForOne,
+      amountSpecified: BigInt(swapParams.amountSpecified),
+      sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
+    };
+
+    const testSettings = {
+      takeClaims: false,
+      settleUsingBurn: false,
+    };
+
+    const poolSwapTestAddress = CONTRACTS.POOL_SWAP_TEST as Address;
+
+    // Check if swapping native ETH
+    const isNativeEthSwap = poolKey.currency0 === "0x0000000000000000000000000000000000000000";
+    const swapAmountAbs = BigInt(swapParams.amountSpecified) < 0n
+      ? -BigInt(swapParams.amountSpecified)
+      : BigInt(swapParams.amountSpecified);
+    const ethValue = isNativeEthSwap && swapParams.zeroForOne ? swapAmountAbs : 0n;
 
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
-      to: poolHelperAddress,
+      to: poolSwapTestAddress,
       data: encodeFunctionData({
-        abi: POOL_HELPER_ABI,
+        abi: POOL_SWAP_TEST_ABI,
         functionName: "swap",
         args: [
           poolKey,
-          swapParams.zeroForOne,
-          BigInt(swapParams.amountSpecified),
-          BigInt(swapParams.sqrtPriceLimitX96),
+          swapTestParams,
+          testSettings,
           hookData,
-          this.account.address,
         ],
       }),
+      value: ethValue,
     });
 
     const gasPrice = await this.publicClient.getGasPrice();
