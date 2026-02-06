@@ -63,10 +63,10 @@ Submit a private swap.
   "swapParams": {
     "poolKey": {
       "currency0": "0x0000000000000000000000000000000000000000",
-      "currency1": "<token_address>",
+      "currency1": "0x31d0220469e10c4E71834a79b1f276d740d3768F",
       "fee": 3000,
       "tickSpacing": 60,
-      "hooks": "0xeB72E2495640a4B83EBfc4618FD91cc9beB640c4"
+      "hooks": "0x3bee7D1A5914d1ccD34D2a2d00C359D0746400C4"
     },
     "zeroForOne": true,
     "amountSpecified": "-1000000000000000",
@@ -103,10 +103,19 @@ Submit a private swap.
 | Contract | Address |
 |----------|---------|
 | GrimPool | `0xEAB5E7B4e715A22E8c114B7476eeC15770B582bb` |
-| GrimSwapZK (Hook) | `0xeB72E2495640a4B83EBfc4618FD91cc9beB640c4` |
+| GrimSwapZK (Hook) | `0x3bee7D1A5914d1ccD34D2a2d00C359D0746400C4` |
 | GrimSwapRouter | `0xC13a6a504da21aD23c748f08d3E991621D42DA4F` |
 | Groth16Verifier | `0xF7D14b744935cE34a210D7513471a8E6d6e696a0` |
 | PoolSwapTest | `0x9140a78c1A137c7fF1c151EC8231272aF78a99A4` |
+| PoolManager | `0x00B036B58a818B1BC34d502D3fE730Db729e62AC` |
+| USDC | `0x31d0220469e10c4E71834a79b1f276d740d3768F` |
+
+## Pool Configuration
+
+The ETH/USDC GrimSwap Privacy Pool uses:
+- **Fee**: 3000 (0.3%)
+- **TickSpacing**: 60
+- **Pool ID**: `0xca4150cd3ab144877e0dee5630129d84b986daa7ef5f287729e2f2da00c3fe38`
 
 ## Features
 
