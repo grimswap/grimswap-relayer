@@ -102,7 +102,7 @@ const GRIM_POOL_ABI = [
   },
 ] as const;
 
-// GrimSwapRouter ABI for production private swaps
+// GrimSwapRouterV2 ABI for production private swaps (ETH + ERC20)
 const GRIM_SWAP_ROUTER_ABI = [
   {
     type: "function",
@@ -133,6 +133,36 @@ const GRIM_SWAP_ROUTER_ABI = [
     outputs: [],
     stateMutability: "nonpayable",
   },
+  {
+    type: "function",
+    name: "executePrivateSwapToken",
+    inputs: [
+      {
+        name: "key",
+        type: "tuple",
+        components: [
+          { name: "currency0", type: "address" },
+          { name: "currency1", type: "address" },
+          { name: "fee", type: "uint24" },
+          { name: "tickSpacing", type: "int24" },
+          { name: "hooks", type: "address" },
+        ],
+      },
+      {
+        name: "params",
+        type: "tuple",
+        components: [
+          { name: "zeroForOne", type: "bool" },
+          { name: "amountSpecified", type: "int256" },
+          { name: "sqrtPriceLimitX96", type: "uint160" },
+        ],
+      },
+      { name: "inputToken", type: "address" },
+      { name: "hookData", type: "bytes" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
 ] as const;
 
 interface RelayParams {
@@ -153,6 +183,7 @@ interface RelayParams {
     zeroForOne: boolean;
     amountSpecified: string;
     sqrtPriceLimitX96: string;
+    inputToken?: string; // Optional: ERC20 token address (undefined/null = ETH)
   };
 }
 
@@ -495,20 +526,29 @@ class RelayService {
       sqrtPriceLimitX96: BigInt(swapParams.sqrtPriceLimitX96),
     };
 
-    // Use GrimSwapRouter for production private swaps
-    // Router atomically: releases ETH from GrimPool -> swaps via Uniswap v4
-    // If ZK proof is invalid, entire tx reverts (including ETH release)
+    // Use GrimSwapRouterV2 for production private swaps
+    // Router atomically: releases funds from GrimPool -> swaps via Uniswap v4
+    // If ZK proof is invalid, entire tx reverts (including fund release)
     const routerAddress = CONTRACTS.GRIM_SWAP_ROUTER as Address;
+    const inputToken = swapParams.inputToken;
+    const isERC20Swap = inputToken && inputToken !== "0x0000000000000000000000000000000000000000";
 
-    const swapData = encodeFunctionData({
-      abi: GRIM_SWAP_ROUTER_ABI,
-      functionName: "executePrivateSwap",
-      args: [poolKey, routerSwapParams, hookData],
-    });
+    const swapData = isERC20Swap
+      ? encodeFunctionData({
+          abi: GRIM_SWAP_ROUTER_ABI,
+          functionName: "executePrivateSwapToken",
+          args: [poolKey, routerSwapParams, inputToken as Address, hookData],
+        })
+      : encodeFunctionData({
+          abi: GRIM_SWAP_ROUTER_ABI,
+          functionName: "executePrivateSwap",
+          args: [poolKey, routerSwapParams, hookData],
+        });
 
     logger.info("Router call data prepared, estimating gas...");
     logger.info(`Pool: ${poolKey.currency0} -> ${poolKey.currency1}`);
     logger.info(`Amount: ${swapParams.amountSpecified}, zeroForOne: ${swapParams.zeroForOne}`);
+    logger.info(`Input token: ${isERC20Swap ? inputToken : "ETH"}`);
     logger.info(`Router: ${routerAddress}`);
 
     // Estimate gas with error handling
@@ -638,15 +678,25 @@ class RelayService {
     };
 
     const routerAddress = CONTRACTS.GRIM_SWAP_ROUTER as Address;
+    const inputToken = swapParams.inputToken;
+    const isERC20Swap = inputToken && inputToken !== "0x0000000000000000000000000000000000000000";
+
+    const swapData = isERC20Swap
+      ? encodeFunctionData({
+          abi: GRIM_SWAP_ROUTER_ABI,
+          functionName: "executePrivateSwapToken",
+          args: [poolKey, routerSwapParams, inputToken as Address, hookData],
+        })
+      : encodeFunctionData({
+          abi: GRIM_SWAP_ROUTER_ABI,
+          functionName: "executePrivateSwap",
+          args: [poolKey, routerSwapParams, hookData],
+        });
 
     const gasEstimate = await this.publicClient.estimateGas({
       account: this.account.address,
       to: routerAddress,
-      data: encodeFunctionData({
-        abi: GRIM_SWAP_ROUTER_ABI,
-        functionName: "executePrivateSwap",
-        args: [poolKey, routerSwapParams, hookData],
-      }),
+      data: swapData,
     });
 
     const gasPrice = await this.publicClient.getGasPrice();
