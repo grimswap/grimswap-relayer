@@ -55,7 +55,8 @@ app.use(cors({
 app.options("*", cors());
 
 app.use(express.json({ limit: "1mb" }));
-app.use(rateLimiter);
+// Rate limiter disabled for hackathon - re-enable for production
+// app.use(rateLimiter);
 
 // Health check
 app.get("/health", (req, res) => {
